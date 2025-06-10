@@ -1,277 +1,153 @@
 import cv2
-import json
-import os
-
-
-
-
-
-from ultralytics import YOLO
 import torch
-
-# Charger l'architecture (par défaut YOLOv8n, ou adapte si tu as utilisé yolov8m, etc.)
-model_dents = YOLO("models/dents_arch.yaml")  # ou le fichier YAML correspondant à ton modèle
-model_dents.model.load_state_dict(torch.load("models/dents_weights_only.pt", map_location="cpu"))
-
-model_implants = YOLO("models/implants_arch.yaml")
-model_implants.model.load_state_dict(torch.load("models/implants_weights_only.pt", map_location="cpu"))
-
-model_bridges = YOLO("models/bridges_arch.yaml")
-model_bridges.model.load_state_dict(torch.load("models/bridges_weights_only.pt", map_location="cpu"))
-
-CLASSES_DENTS = ['canine', 'central incisor', 'lateral incisor', 'molar', 'premolar']
-CLASSES_IMPLANT = ['Implant']
-CLASSES_BRIDGE = ['bridge']
-
-FDI_TEMPLATE = {
-    1: list(range(18, 10, -1)),
-    2: list(range(21, 29)),
-    3: list(range(38, 30, -1)),
-    4: list(range(31, 39))
-}
-
-
-# === UTILS ===
-def midpoint(bbox):
-    x1, y1, x2, y2 = bbox
-    return ((x1 + x2) / 2, (y1 + y2) / 2)
-
-def quadrant_from_y(y, y_split):
-    return 1 if y < y_split else 3
-
-def assign_to_quadrants(detections, y_split):
-    quadrants = {1: [], 2: [], 3: [], 4: []}
-    for d in detections:
-        cls = d['class_name']
-        x, y = d['center']
-        if y < y_split:
-            if x < 640:
-                quadrants[1].append(d)
-            else:
-                quadrants[2].append(d)
-        else:
-            if x < 640:
-                quadrants[4].append(d)
-            else:
-                quadrants[3].append(d)
-    return quadrants
-
-def export_summary(dents_fdi, implants_fdi, bridges_fdi):
-    with open("summary.txt", "w", encoding="utf-8") as f:
-        f.write("--- Schéma dentaire (FDI) ---\n")
-        for dent in sorted(dents_fdi, key=lambda d: d['FDI']):
-            f.write(f"Dent {dent['FDI']} : {dent['class_name']} — {dent['status']}\n")
-
-        f.write("\n--- Implants ---\n")
-        for imp in implants_fdi:
-            f.write(f"Implant remplace la dent {imp['FDI']}\n")
-
-        f.write("\n--- Bridges ---\n")
-        for br in bridges_fdi:
-            f.write(f"Bridge de {br['FDI'][0]} à {br['FDI'][-1]}\n")
-
-
-from ultralytics import YOLO
-import cv2
-
-# Chargement des modèles
-model_dents = YOLO("models/dents.pt")
-model_implants = YOLO("models/implants.pt")
-model_bridges = YOLO("models/bridges.pt")
-
-# Définition des classes utiles
-CLASSES_DENTS = ['canine', 'central incisor', 'lateral incisor', 'molar', 'premolar']
-CLASSES_IMPLANT = ['Implant']
-CLASSES_BRIDGE = ['bridge']
-
-FDI_TEMPLATE = {
-    1: list(range(18, 10, -1)),
-    2: list(range(21, 29)),
-    3: list(range(38, 30, -1)),
-    4: list(range(31, 39))
-}
-
-# === UTILS ===
-def midpoint(bbox):
-    x1, y1, x2, y2 = bbox
-    return ((x1 + x2) / 2, (y1 + y2) / 2)
-
-def assign_to_quadrants(detections, y_split):
-    quadrants = {1: [], 2: [], 3: [], 4: []}
-    for d in detections:
-        x, y = d['center']
-        if y < y_split:
-            if x < 640:
-                quadrants[1].append(d)
-            else:
-                quadrants[2].append(d)
-        else:
-            if x < 640:
-                quadrants[4].append(d)
-            else:
-                quadrants[3].append(d)
-    return quadrants
-
-def export_summary(dents_fdi, implants_fdi, bridges_fdi):
-    with open("summary.txt", "w", encoding="utf-8") as f:
-        f.write("--- Schéma dentaire (FDI) ---\n")
-        for dent in sorted(dents_fdi, key=lambda d: d['FDI']):
-            f.write(f"Dent {dent['FDI']} : {dent['class_name']} — {dent['status']}\n")
-
-        f.write("\n--- Implants ---\n")
-        for imp in implants_fdi:
-            f.write(f"Implant remplace la dent {imp['FDI']}\n")
-
-        f.write("\n--- Bridges ---\n")
-        for br in bridges_fdi:
-            f.write(f"Bridge de {br['FDI'][0]} à {br['FDI'][-1]}\n")
-
-
-# === Fonction principale ===
-import cv2
-import numpy as np
+from statistics import median
+from dataclasses import dataclass
+from typing import List, Dict, Optional
 from ultralytics import YOLO
 
-FDI_ORDER = {
-    1: list(range(18, 10, -1)),
-    2: list(range(21, 29)),
-    3: list(range(38, 30, -1)),
-    4: list(range(41, 49))
-}
 
-FDI_CLASS_MAP = {
-    "central incisor": [1],
-    "lateral incisor": [2],
-    "canine": [3],
-    "premolar": [4, 5],
-    "molar": [6, 7, 8]
-}
-
-CLASSES_DENTS = list(FDI_CLASS_MAP.keys())
-
-model_dents = YOLO("models/dents.pt")
-model_implants = YOLO("models/implants.pt")
-model_bridges = YOLO("models/bridges.pt")
+def load_model(arch_path: str, weights_path: str) -> YOLO:
+    model = YOLO(arch_path)
+    state = torch.load(weights_path, map_location="cpu")
+    model.model.load_state_dict(state)
+    return model
 
 
-def detect_objects(model, image, keep_only=None):
+model_dents = load_model("models/dents_arch.yaml", "models/dents_weights_only.pt")
+model_implants = load_model("models/implants_arch.yaml", "models/implants_weights_only.pt")
+model_bridges = load_model("models/bridges_arch.yaml", "models/bridges_weights_only.pt")
+
+
+@dataclass
+class Detection:
+    bbox: List[float]
+    score: float
+    class_name: str
+    center: List[float]
+
+
+def iou(box_a: List[float], box_b: List[float]) -> float:
+    xa1, ya1, xa2, ya2 = box_a
+    xb1, yb1, xb2, yb2 = box_b
+    inter_x1 = max(xa1, xb1)
+    inter_y1 = max(ya1, yb1)
+    inter_x2 = min(xa2, xb2)
+    inter_y2 = min(ya2, yb2)
+    if inter_x2 <= inter_x1 or inter_y2 <= inter_y1:
+        return 0.0
+    inter_area = (inter_x2 - inter_x1) * (inter_y2 - inter_y1)
+    area_a = (xa2 - xa1) * (ya2 - ya1)
+    area_b = (xb2 - xb1) * (yb2 - yb1)
+    union_area = area_a + area_b - inter_area
+    return inter_area / union_area
+
+
+def nms(detections: List[Detection], threshold: float = 0.5) -> List[Detection]:
+    detections = sorted(detections, key=lambda d: d.score, reverse=True)
+    keep: List[Detection] = []
+    while detections:
+        current = detections.pop(0)
+        keep.append(current)
+        detections = [d for d in detections if iou(d.bbox, current.bbox) <= threshold]
+    return keep
+
+
+def detect_objects(model: YOLO, image, keep_only: Optional[List[str]] = None) -> List[Detection]:
     results = model(image)
-    detections = []
     names = model.names
+    detections: List[Detection] = []
     for box in results[0].boxes:
         x1, y1, x2, y2 = map(float, box.xyxy[0])
         class_id = int(box.cls[0])
+        score = float(box.conf[0])
         class_name = names[class_id]
         if keep_only and class_name not in keep_only:
             continue
         center = [(x1 + x2) / 2, (y1 + y2) / 2]
-        detections.append({"bbox": [x1, y1, x2, y2], "class_name": class_name, "center": center})
+        detections.append(Detection([x1, y1, x2, y2], score, class_name, center))
     return detections
 
 
-def split_into_quadrants(dents, width, height):
+CLASSES_DENTS = ["canine", "central incisor", "lateral incisor", "molar", "premolar"]
+
+
+def split_into_quadrants(detections: List[Detection], width: int, height: int) -> Dict[int, List[Detection]]:
     mid_x, mid_y = width / 2, height / 2
     quadrants = {1: [], 2: [], 3: [], 4: []}
-    for d in dents:
-        x, y = d["center"]
+    for det in detections:
+        x, y = det.center
         if y < mid_y:
             quadrant = 1 if x < mid_x else 2
         else:
             quadrant = 4 if x < mid_x else 3
-        quadrants[quadrant].append(d)
+        quadrants[quadrant].append(det)
     return quadrants
 
 
-def find_missing_molar_case(molars, premolars, fdi_positions, reverse):
-    if len(molars) != 2 or len(premolars) != 1 or len(fdi_positions) != 3:
-        return None
-
-    premolar = premolars[0]
-    P = premolar["center"][0]
-    sorted_molars = sorted(molars, key=lambda d: d["center"][0], reverse=reverse)
-    M1 = sorted_molars[0]["center"][0]
-    M2 = sorted_molars[1]["center"][0]
-
-    D1 = abs(P - M1)
-    D2 = abs(M1 - M2)
-
-    if abs(D1 - D2) < 10:
-        missing_index = 2
-    elif D1 > D2:
-        missing_index = 0
-    else:
-        missing_index = 1
-
-    complete = []
-    i_molar = 0
-    for i in range(3):
-        if i == missing_index:
-            complete.append({"FDI": fdi_positions[i], "status": "absente", "class_name": "molar", "center": None})
-        else:
-            complete.append({
-                "FDI": fdi_positions[i],
-                "status": "présente",
-                "class_name": "molar",
-                "center": sorted_molars[i_molar]["center"]
-            })
-            i_molar += 1
-    return complete
+def sort_quadrant(dents: List[Detection], quadrant: int, mid_x: float) -> List[Detection]:
+    if quadrant in (1, 4):
+        return sorted(dents, key=lambda d: d.center[0], reverse=True)
+    return sorted(dents, key=lambda d: d.center[0])
 
 
-def assign_fdi_numbers(quadrants):
-    assigned = []
-    for q, dents in quadrants.items():
-        reverse = q in [1, 4]
-        for class_name, digits in FDI_CLASS_MAP.items():
-            class_dents = [d for d in dents if d["class_name"] == class_name]
-            fdi_positions = [int(f"{q}{digit}") for digit in digits]
+def assign_tooth_numbers(dents: List[Detection], quadrant: int, mid_x: float, width: int) -> List[Dict]:
+    numbers = []
+    if not dents:
+        for idx in range(1, 9):
+            numbers.append({"FDI": quadrant * 10 + idx, "status": "absente", "center": None})
+        return numbers
 
-            if class_name == "molar" and len(class_dents) == 2:
-                premolars = [d for d in dents if d["class_name"] == "premolar"]
-                custom = find_missing_molar_case(class_dents, premolars, fdi_positions, reverse)
-                if custom:
-                    assigned.extend(custom)
-                    continue
+    dents_sorted = sort_quadrant(dents, quadrant, mid_x)
+    xs = [d.center[0] for d in dents_sorted]
+    gaps = [abs(xs[i + 1] - xs[i]) for i in range(len(xs) - 1)]
+    typical = median(gaps) if gaps else width / 16
+    threshold = typical * 1.5
+    pos = 1
+    first_gap = abs(xs[0] - mid_x)
+    miss_start = max(0, int(round(first_gap / typical)) - 1) if first_gap > threshold else 0
+    for _ in range(miss_start):
+        if pos <= 8:
+            numbers.append({"FDI": quadrant * 10 + pos, "status": "absente", "center": None})
+            pos += 1
+    numbers.append({"FDI": quadrant * 10 + pos, "status": "présente", "class_name": dents_sorted[0].class_name, "center": dents_sorted[0].center})
+    pos += 1
+    prev_x = xs[0]
+    for cur_x, det in zip(xs[1:], dents_sorted[1:]):
+        gap = abs(cur_x - prev_x)
+        miss = max(0, int(round(gap / typical)) - 1) if gap > threshold else 0
+        for _ in range(miss):
+            if pos <= 8:
+                numbers.append({"FDI": quadrant * 10 + pos, "status": "absente", "center": None})
+                pos += 1
+        if pos <= 8:
+            numbers.append({"FDI": quadrant * 10 + pos, "status": "présente", "class_name": det.class_name, "center": det.center})
+            pos += 1
+        prev_x = cur_x
+    while pos <= 8:
+        numbers.append({"FDI": quadrant * 10 + pos, "status": "absente", "center": None})
+        pos += 1
+    return numbers
 
-            sorted_dents = sorted(class_dents, key=lambda d: d["center"][0], reverse=reverse)
-            for i, fdi in enumerate(fdi_positions):
-                if i < len(sorted_dents):
-                    assigned.append({
-                        "FDI": fdi,
-                        "status": "présente",
-                        "class_name": class_name,
-                        "center": sorted_dents[i]["center"]
-                    })
-                else:
-                    assigned.append({
-                        "FDI": fdi,
-                        "status": "absente",
-                        "class_name": class_name,
-                        "center": None
-                    })
-    return assigned
+
+def assign_fdi_numbers(quadrants: Dict[int, List[Detection]], width: int) -> List[Dict]:
+    all_numbers = []
+    mid_x = width / 2
+    for q in [1, 2, 3, 4]:
+        all_numbers.extend(assign_tooth_numbers(quadrants[q], q, mid_x, width))
+    return all_numbers
 
 
 def process_cv2_image(img):
     h, w = img.shape[:2]
+    det_dents = nms(detect_objects(model_dents, img, CLASSES_DENTS))
+    det_implants = detect_objects(model_implants, img)
+    det_bridges = detect_objects(model_bridges, img)
 
-    # Détection filtrée
-    detections_dents = detect_objects(model_dents, img, keep_only=CLASSES_DENTS)
-    detections_implants = detect_objects(model_implants, img)
-    detections_bridges = detect_objects(model_bridges, img)
-
-    # Attribution FDI
-    quadrants = split_into_quadrants(detections_dents, w, h)
-    fdi_assigned = assign_fdi_numbers(quadrants)
-
+    quadrants = split_into_quadrants(det_dents, w, h)
+    numbers = assign_fdi_numbers(quadrants, w)
 
     return {
-        "dents": fdi_assigned,
-        "implants": detections_implants,
-        "bridges": detections_bridges
+        "dents": numbers,
+        "implants": [d.__dict__ for d in det_implants],
+        "bridges": [d.__dict__ for d in det_bridges],
     }
-
-
-
-if __name__ == "__main__":
-    process_image("input.jpg")

@@ -1,8 +1,9 @@
-# handler.py
 import requests
 import cv2
 import numpy as np
-from main_logic import process_cv2_image  # renomme `main.py` en `main_logic.py` si besoin
+import runpod
+from main_logic import process_cv2_image
+
 
 def handler(event):
     image_url = event.get("image_url")
@@ -26,3 +27,7 @@ def handler(event):
         "message": "Analyse terminée ✅",
         "summary": result
     }
+
+
+if __name__ == "__main__":
+    runpod.serverless.start({"handler": handler})
