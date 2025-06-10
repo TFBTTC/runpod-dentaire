@@ -1,0 +1,832 @@
+Attribution automatique des numéros FDI sur
+une radiographie panoramique
+Contexte et objectifs
+L’identification et la numérotation des dents sur une radiographie panoramique
+(orthopantomogramme) est cruciale pour le diagnostic dentaire. Un système de détection par IA (p. ex.
+YOLO) permet déjà de localiser les dents par des boîtes englobantes (bbox) et de prédire une classe
+anatomique (incisive, canine, molaire, etc.). Cependant, cette classification brute est peu fiable pour
+déterminer le numéro dentaire exact. L’objectif est donc de développer un algorithme robuste qui
+attribue automatiquement à chaque dent détectée son numéro selon le système FDI (Fédération
+Dentaire Internationale), en respectant la logique anatomique, l’unicité des numéros et en gérant
+d’éventuelles dents manquantes. Le système devra :
+Déterminer les quadrants (1 à 4) à partir de la position des dents (haut/bas de l’image pour
+maxillaire/mandibule, gauche/droite pour côté patient).
+Trier les dents dans chaque quadrant dans l’ordre anatomique (de l’incisive centrale vers la
+dernière molaire).
+Attribuer les numéros FDI cohérents (par ex. 11, 12, …, 18 pour le quadrant 1) à chaque dent
+détectée.
+Détecter les dents manquantes en analysant les écarts de position, la symétrie opposée et les
+connaissances anatomiques, afin de sauter les numéros correspondants le cas échéant.
+Garantir l’unicité et la validité des numéros assignés (pas de doublons ni de numéros
+impossibles tels que 10, 39, etc.).
+Le défi est d’obtenir un algorithme prêt pour la clinique, fiable face aux variations (positions
+manquantes, chevauchements, erreurs de détection), tout en restant simple à implémenter en Python
+et à intégrer en production.
+État de l’art : numérotation dentaire automatique
+Plusieurs travaux de recherche récents ont abordé la détection et la numérotation automatiques des
+dents sur radiographies panoramiques. Les approches les plus performantes combinent généralement
+réseaux de neurones profonds et règles heuristiques basées sur l’anatomie :
+Modèles de détection + classification CNN : Tuzoff et al. (2019) ont proposé une solution où un
+modèle Faster R-CNN détecte les dents, suivi d’un module de numérotation utilisant un CNN
+(VGG-16) pour classifier chaque dent détectée selon son numéro FDI . Cette étape était
+couplée à un algorithme heuristique imposant les règles spatiales dentaires (ordre des dents
+dans la mâchoire) afin de corriger les erreurs de classification brute . Le système a atteint une
+performance quasi-humaine, avec une sensibilité de 98% et une spécificité de 99,94% pour la
+numérotation automatique – c’est-à-dire un niveau comparable à celui d’un expert dentaire.
+Ces excellents résultats confirment l’importance d’introduire des connaissances a priori
+(position relative des dents) en plus de la simple classification par CNN.
+•
+•
+•
+•
+•
+•
+1
+1
+2
+1
+Approches combinant deep learning et heuristique : Chen et al. (2019) ont utilisé un Faster RCNN pour la détection, puis appliqué trois post-traitements basés sur l’expertise métier : (1)
+filtrage des détections redondantes qui correspondent à la même dent, (2) détection
+automatique des dents manquantes, et (3) un module de correction rule-based ajustant les labels
+de numérotation pour éliminer les incohérences avec les règles dentaires . Concrètement, ils
+suppriment d’abord les boîtes qui se chevauchent pour ne garder qu’une détection par dent ,
+puis identifient s’il manque une dent dans la séquence, et enfin ajustent les numéros détectés en
+tenant compte de la séquence attendue (par exemple, réassigner un label gauche/droite correct,
+combler un saut de numérotation, etc.) . Ce pipeline a permis d’obtenir plus de 90% de
+précision et rappel en numérotation, et une performance proche d’un dentiste junior .
+Intégration de la connaissance anatomique : Dans ces études, l’utilisation de gabarits
+anatomiques ou de règles prédéfinies s’est avérée indispensable pour corriger les erreurs brutes
+du réseau neuronal. Par exemple, le module heuristique de Tuzoff impose que les dents d’un
+quadrant soient étiquetées dans l’ordre spatial (de la ligne médiane vers l’arrière), et rectifie les
+inversions ou duplications éventuelles . De même, Chen et al. exploitent explicitement le
+gabarit FDI : après détection, ils comparent les positions détectées à une template complète de
+8 positions par quadrant, insèrent des “dents manquantes” si un grand écart est détecté, puis
+ajustent les numéros en conséquence . Ils notent notamment que « l’écart entre des boîtes
+adjacentes » peut servir de feature pour prédire les dents manquantes . Ce principe guide
+notre algorithme.
+Projets open-source et frameworks : Des implémentations disponibles montrent des stratégies
+similaires. Par exemple, un projet GitHub basé sur Detectron2 procède en deux étapes : d’abord
+une segmentation de l’image en quadrants (haut gauche, haut droit, bas gauche, bas droit),
+puis un modèle d’énumération par quadrant applique la détection/numérotation dentaire sur
+chaque quart d’image indépendamment . Cette séparation simplifie la tâche en limitant le
+champ de vision du modèle à un seul quadrant (moins de confusion gauche-droite). D’autres
+projets (p. ex. SimurgAI Lab) implémentent un module de numérotation prenant en entrée les
+segments de dents détectés et attribuant les labels FDI correspondants, généralement en
+s’appuyant sur TensorFlow/Keras et sur les règles universelles de l’odontogramme FDI
+(quadrants 1-4, positions 1-8) . Ces travaux confirment la faisabilité d’un algorithme robuste
+pour la numérotation automatique, à condition d’intégrer les règles métiers dentaires.
+Performance des méthodes hybrides : De manière générale, les approches mêlant détection
+par CNN et règles explicites obtiennent les meilleurs scores de numérotation. Par exemple,
+Nosrati et al. (2020) ont combiné un détecteur RCNN et un algorithme heuristique pour
+numéroter dents et implants sur panorama, obtenant environ 84,5% de précision en
+numérotation automatique – largement supérieur à un modèle sans post-traitement
+heuristique. Les erreurs résiduelles proviennent souvent de situations complexes :
+chevauchement de racines, dents surnuméraires ou manquantes, confusion entre dents
+similaires adjacentes, etc. Un cas courant d’erreur rapporté est l’inversion gauche-droite de
+certaines étiquettes de dents lorsque l’algorithme ne détermine pas correctement le quadrant
+. Il est donc crucial que l’algorithme prenne en compte l’orientation de l’image pour éviter,
+par exemple, de numéroter une dent du côté gauche comme si elle était à droite (et vice versa)
+.
+En résumé, les recherches indiquent qu’un algorithme fiable de numérotation doit combiner : (a) une
+bonne détection initiale des dents (fourni ici par YOLO), (b) des règles de tri et de regroupement par
+quadrant, (c) la détection des dents manquantes par analyse des positions, et (d) une vérification
+•
+3
+4
+4
+3
+•
+1
+5
+6
+•
+7
+1
+•
+8
+9
+9
+2
+finale de cohérence. Nous allons détailler ces règles anatomiques, puis proposer une structure
+d’algorithme étape par étape en français, avec des suggestions d’implémentation Python.
+Rappels des règles anatomiques (numérotation FDI)
+Avant de définir l’algorithme, il convient de formaliser les règles de numérotation dentaire selon le
+système FDI, ainsi que les invariants anatomiques dont on dispose :
+Quadrants et numérotation FDI : La bouche est divisée en 4 quadrants numérotés de 1 à 4
+pour la dentition permanente (1 = quadrant supérieur droit du patient, 2 = supérieur gauche, 3 =
+inférieur gauche, 4 = inférieur droit). Chaque dent est désignée par un nombre à deux chiffres :
+le premier chiffre est le quadrant, le second la position de la dent à l’intérieur du quadrant .
+Les dents de 1 à 8 dans chaque quadrant correspondent respectivement, de la ligne médiane
+vers l’arrière, à : 1. Incisive centrale, 2. Incisive latérale, 3. Canine, 4. Première prémolaire, 5.
+Deuxième prémolaire, 6. Première molaire, 7. Deuxième molaire, 8. Troisième molaire (dent de
+sagesse) . Ainsi, les dents permanentes sont numérotées de 11 à 18 (quadrant 1), 21 à 28
+(quadrant 2), 31 à 38 (quadrant 3) et 41 à 48 (quadrant 4) . Il n’existe aucun numéro se
+terminant par 0 ou 9 dans ce système (pas de “10”, “20”, “39”, etc.) . Toute sortie
+comportant un tel numéro serait donc clairement erronée. De même, chaque numéro FDI doit
+être unique par dent : on ne peut attribuer deux fois “13” par exemple, ni sauter du 12 au 14
+dans un même quadrant sans marquer la 13 comme manquante.
+Séparation haut/bas (maxillaire vs mandibule) : En radiographie panoramique, les dents du
+maxillaire (mâchoire supérieure) apparaissent dans la moitié supérieure de l’image, et les dents de
+la mandibule (mâchoire inférieure) dans la moitié inférieure. Cette séparation verticale est
+généralement très nette, sauf artefact particulier. Il est donc possible de discriminer les dents du
+haut (quadrants 1 et 2) et du bas (quadrants 3 et 4) par leur coordonnée Y (ordonnée) sur
+l’image. Une simple ligne horizontale passant approximativement par le milieu vertical de
+l’image (ou une classification bi-phonique des coordonnées Y) permet de séparer les deux
+arcades. On notera qu’en panoramique, les arcades peuvent être légèrement courbées, mais
+chaque dent se localise sans ambiguïté dans l’une des deux mâchoires.
+Séparation gauche/droite (quadrants contra-latéraux) : La distinction entre le côté gauche et
+droit du patient se fait selon la position par rapport à la ligne médiane verticale. En imagerie
+médicale, par convention le côté droit du patient est souvent présenté à gauche de l’image.
+Ainsi, pour une panoramique standard, la gauche de l’image correspond aux dents des
+quadrants 1 (haut droit du patient) et 4 (bas droit du patient), tandis que la droite de l’image
+montre les quadrants 2 (haut gauche du patient) et 3 (bas gauche) . Il faudra s’assurer de
+cette convention (certaines images peuvent être inversées, auquel cas il faudrait échanger les
+quadrants 1↔2 et 3↔4). En production clinique, l’orientation devrait être connue et fixe.
+L’algorithme définira donc une ligne verticale (l’axe médian) – idéalement passant par le milieu
+de l’image ou calibrée sur des repères (p. ex. la jonction des incisives centrales s’il y en a) – pour
+séparer les dents de gauche et de droite. Aucune dent ne doit être assignée simultanément à
+deux côtés. En cas d’ambiguïté (par exemple une incisive centrale isolée proche du milieu),
+l’algorithme devra trancher de manière cohérente et conserver l’ordre séquentiel des numéros
+de part et d’autre du milieu.
+Ordre anatomique des dents : Dans chaque quadrant, les dents sont disposées de l’avant vers
+l’arrière. La dent la plus proche du centre (ligne médiane) est toujours l’incisive centrale
+(position 1), suivie de l’incisive latérale (2), de la canine (3), etc., jusqu’à la dernière molaire
+•
+10
+10
+10
+11 10
+•
+•
+10
+•
+3
+(position 8 si elle est présente) . Sur une radiographie panoramique, cela signifie que si l’on
+parcourt les dents d’un quadrant du centre vers l’extérieur, on devrait rencontrer des dents aux
+positions FDI croissantes (par exemple quadrant 1 : 11, puis 12, 13, ... jusqu’à 18). Inversement,
+en parcourant l’image d’un côté vers le milieu, on descend les numéros. Toute inversion dans
+cet ordre est anatomiquement impossible (à moins d’une erreur de détection ou de
+numérotation). L’algorithme doit donc imposer que, après tri spatial, les numéros assignés
+suivent cette progression monotone. Si un numéro proposé se trouve en dehors de la séquence
+ordonnée du quadrant, c’est qu’il y a eu une erreur de classement.
+Unicité et correspondance biunivoque : Chaque dent réelle correspond à un et un seul
+numéro FDI, et inversement chaque numéro (dans la plage valide) correspond au plus à une
+dent présente. Cela implique deux choses : (a) si le détecteur YOLO produit plus de 8 détections
+dans un même quadrant, certaines détections sont soit des doublons (même dent détectée deux
+fois) soit des artefacts (p. ex. segment d’une racine confondu avec une dent) – il faudra alors
+fusionner ou ignorer les doublons; (b) si le détecteur produit moins de détections que le
+nombre théorique de dents (8) dans un quadrant, on doit supposer que les dents manquantes
+sont réellement absentes (extraites ou non écloses) et conserver leur place vide dans la
+séquence de numérotation. On veillera aussi à gérer les cas particuliers : par exemple, s’il n’y a
+aucune dent détectée dans un quadrant entier (édentement complet d’un côté), l’algorithme
+peut marquer toutes les dents de ce quadrant comme manquantes et ne rien numéroter pour
+celui-ci, ou attribuer un code particulier (selon le format de sortie souhaité, possiblement hors
+du scope immédiat). Un autre cas limite est l’existence de dents surnuméraires (dents en plus,
+telles que des « dent de sagesse supplémentaires » ou des doublons). Le système FDI standard
+ne prévoit pas de numéro >8 par quadrant. En production, on pourrait soit ignorer ces dents
+surnuméraires (pas de numéro FDI, ou les numéroter séparément en annotation), soit les
+marquer avec un suffixe – mais ici on pourra supposer que de tels cas sont rares et, s’ils
+surviennent, qu’une intervention manuelle est nécessaire. L’algorithme peut toutefois détecter
+une surnuméraire si un quadrant a 9 détections distinctes (hors doublons). Dans ce cas, il ne
+devra pas attribuer un numéro invalide (par ex. « 19 ») mais éventuellement alerter de la
+présence d’une dent supplémentaire non numérotée.
+Gestion des dents manquantes (édentation partielle) : C’est un point critique. Fréquemment,
+certaines dents peuvent ne pas être présentes : dents de sagesse non écloses ou extraites
+(absence fréquente de 18, 28, 38, 48), incisives latérales supérieures congénitalement absentes
+(pas de 12 et/ou 22), prémolaires manquantes suite à extractions orthodontiques, ou pertes
+dentaires diverses (caries, accidents) touchant par exemple les premières molaires (6) ou
+secondes molaires (7). L’algorithme doit déduire la position des dents manquantes en se
+basant sur l’espacement anormal entre dents voisines et la symétrie opposée. En pratique,
+lorsque des dents manquent, les dents restantes ont souvent un écart plus grand entre elles à
+l’emplacement vide. Par exemple, si en quadrant 2 l’incisive latérale 22 manque, il y aura un
+grand espace entre 21 et 23 (incisive centrale et canine) par rapport aux petits espaces normaux
+entre dents adjacentes. De même, si la dent 18 est absente, la 17 (2e molaire) sera la dernière
+dent détectée et pourra être nettement en avant par rapport au bord postérieur de la mâchoire
+attendu – créant un espace postérieur vide. En outre, la symétrie gauche-droite peut fournir un
+indice : souvent, l’absence d’une dent sur un côté s’observe aussi de l’autre côté (p. ex. absence
+bilatérale des 3e molaires). Sans que cela soit une règle absolue, l’algorithme peut comparer le
+nombre de dents détectées dans les quadrants opposés (Q1 vs Q2, Q3 vs Q4) : un écart de
+détection d’une dent suggère fortement une absence unilatérale à l’endroit correspondant. Par
+exemple, si le quadrant 1 a 7 dents détectées et le quadrant 2 en a 8, il y a de fortes chances que
+la dent manquante dans Q1 soit précisément celle qui n’a pas de correspondante en face (si Q2 a
+10
+•
+•
+4
+toutes ses dents). En croisant ces informations avec les positions effectives des dents détectées,
+on peut inférer quelle position est vide.
+Alignement anatomique global : Idéalement, les dents devraient s’aligner sur l’arcade de
+chaque mâchoire de façon régulière. En réalité, il peut y avoir des chevauchements ou des
+déplacements dentaires (rotation, encombrement), mais l’ordre reste le même. Notre algorithme
+utilisera majoritairement les positions projetées sur l’axe horizontal pour trier, mais on gardera à
+l’esprit l’architecture courbe de l’arcade. Dans des cas extrêmes (ex. incisives très chevauchées),
+l’ordre en X pur pourrait être perturbé – mais comme YOLO fournit des boîtes englobantes par
+dent, on suppose que l’ordre des centres de ces boîtes le long de l’axe X correspondra à l’ordre
+réel des dents sur l’arcade. Si une inversion était détectée (ex. une canine détectée avec un
+centre X légèrement plus proche du milieu qu’une incisive latérale, à cause d’un chevauchement),
+on pourra éventuellement la corriger en utilisant le type anatomique prédit (si fiable) ou la
+logique qu’une canine ne peut pas se trouver en avant de l’incisive latérale. Mais ces cas restent
+rares et complexes, on considérera principalement que le tri par X est valable.
+En synthèse, ces règles fournissent un cadre strict pour attribuer les numéros FDI : identification du
+quadrant adéquat, ordre séquentiel des indices 1–8, reconnaissance des absences par discontinuité spatiale,
+aucune duplication ni confusion inter-quadrant. En nous appuyant sur ces principes, nous proposons cidessous un algorithme pas-à-pas intégrant ces bonnes pratiques, accompagné de conseils
+d’implémentation en Python.
+Algorithme proposé pour la numérotation FDI automatique
+Nous décrivons les étapes de l’algorithme à suivre une fois qu’on dispose de la liste des dents
+détectées par YOLO (avec leurs coordonnées de bbox). Chaque étape intègre les recommandations et
+règles vues plus haut :
+1. Filtrage des détections redondantes
+Il s’agit d’éliminer les doublons de détection qui correspondent à la même dent. Parfois, le modèle YOLO
+(ou un autre détecteur) peut produire deux boîtes englobantes se chevauchant fortement sur une
+même dent (surtout en cas de dents très rapprochées ou de segmentation confuse). On applique un
+filtre de non-maxima : par exemple, calculer l’IoU (intersection over union) entre chaque paire de bbox
+détectées, et si l’IoU dépasse un certain seuil (e.g. > 0,5), on considère qu’il s’agit du même objet . On
+ne conserve alors que la bbox avec la plus haute confiance ou la plus grande aire (au choix, le but étant
+de garder l’identification la plus probable). Ainsi, chaque dent réelle n’a plus qu’une seule détection.
+Chen et al. soulignent cette étape comme primordiale avant la numérotation .
+Implémentation : on peut calculer l’IoU entre toutes les paires de boîtes via une double boucle ou en
+utilisant des utilitaires de vision (OpenCV, PyTorch, etc.). En Python pur, on peut itérer sur les détections
+triées par score de confiance : pour chaque bbox, éliminer toutes celles qui restent ayant IoU > seuil
+avec elle. Une autre approche consiste à utiliser un algorithme standard de suppression de non-maxima
+(NMS) disponible dans de nombreuses bibliothèques.
+•
+4
+4
+5
+2. Séparation des quadrants (classification spatiale)
+On va regrouper les détections filtrées en quatre groupes correspondant aux quadrants. Pour cela :
+Séparation haut vs bas : On divise les dents en deux ensembles en fonction de la coordonnée Y
+de leur centre (ou de leur bbox). Une façon simple est de calculer la moyenne (ou médiane) des Y
+de toutes les détections, qui devrait se situer vers l’espace inter-arcades. En dessous de cette
+valeur, on classera les détections comme mâchoire inférieure (quadrants 3 et 4), et au-dessus
+comme mâchoire supérieure (quadrants 1 et 2). Pour plus de robustesse, on peut utiliser un
+clustering (k-means avec k=2) sur les coordonnées Y pour séparer les deux clusters naturels .
+Cela gère mieux les cas où l’image n’est pas parfaitement centrée horizontalement. Quoi qu’il en
+soit, on obtient deux groupes : les dents du haut (haut de l’image) et du bas (bas de l’image).
+Séparation gauche vs droite : Pour chaque groupe (haut et bas), on sépare ensuite selon la
+coordonnée X (abscisse). On définit l’axe vertical médian. Si on connaît la largeur de l’image, on
+peut initialiser ce plan médian à X = (largeur/2). Sinon, on peut prendre le milieu entre la dent la
+plus à gauche et la plus à droite. Alternativement, un k-means (k=2) sur les X dans chaque demiarcade peut partitionner automatiquement en cluster gauche vs droite. L’idée est de distinguer
+les dents situées du côté gauche de l’image de celles du côté droit de l’image. On obtient ainsi
+potentiellement 4 groupes : Haut-Gauche, Haut-Droite, Bas-Gauche, Bas-Droite (du point de
+vue de l’image). Chaque groupe correspondra à un quadrant FDI, sous réserve d’identifier
+correctement quel côté correspond à quel numéro de quadrant.
+Identification des quadrants numérotés : En se basant sur l’orientation standard (patient de
+face, droite du patient à gauche de l’image), on peut attribuer :
+Groupe Haut-Gauche de l’image = Quadrant 1 (maxillaire droit du patient, dents 11–18) .
+Groupe Haut-Droite de l’image = Quadrant 2 (maxillaire gauche, dents 21–28).
+Groupe Bas-Gauche de l’image = Quadrant 4 (mandibule droite, dents 41–48).
+Groupe Bas-Droite de l’image = Quadrant 3 (mandibule gauche, dents 31–38).
+Il est crucial de vérifier ce mapping. Si l’image était inversée latéralement (ce qui peut être indiqué par
+un marqueur “L”/“R” sur la radio ou par la connaissance du logiciel), il faudrait échanger Q1 ↔ Q2 et Q4
+↔ Q3. En l’absence d’indication explicite, on adoptera la convention ci-dessus. On peut introduire une
+légère vérification empirique : par exemple, regarder la forme des racines des molaires sur chaque côté
+(les molaires maxillaires droites vs gauches ont des inclinaisons similaires que l’algorithme pourrait
+détecter avec une classification supplémentaire, mais c’est complexe). Dans la plupart des cas, la
+convention d’affichage sera constante dans l’application. On prendra donc comme hypothèse de départ
+que gauche image = quadrant 1/4 et droite image = quadrant 2/3, tout en laissant éventuellement
+un paramètre de configuration pour inverser si nécessaire en production.
+Gestion des cas sans dents dans un groupe : Si un cluster attendu est vide (par exemple
+aucune dent détectée en haut à droite de l’image – possiblement un quadrant édenté complet),
+l’algorithme peut créer malgré tout un conteneur vide pour ce quadrant et marquer que toutes
+ses dents sont manquantes. Il faudra éviter d’essayer de traiter un groupe vide dans les étapes
+suivantes (tri, attribution), sauf à simplement générer la liste des numéros manquants. En
+pratique, on peut avoir un quadrant totalement vide chez un patient porteur d’une prothèse
+totale sur une mâchoire ou un hémimaxillaire – c’est rare mais possible. Notre algorithme
+considérera ce cas extrême en ne produisant aucune détection à numéroter pour le quadrant
+vide (ou en produisant un tableau de 8 dents manquantes si la sortie l’exige).
+•
+7
+•
+•
+• 10
+•
+•
+•
+•
+6
+À ce stade, chaque dent détectée appartient à l’un des 4 quadrants (sauf dents ignorées/filtrées
+précédemment). On a identifié le quadrant FDI pour chaque groupe.
+3. Tri spatial des dents à l’intérieur de chaque quadrant
+Maintenant que les dents sont groupées par quadrant, on les ordonne selon leur position horizontale
+afin de refléter l’ordre anatomique (de l’incisive centrale vers la dernière molaire). Concrètement, pour
+chaque groupe de dents du même quadrant :
+On trie les détections par la coordonnée X de leur centre (ou de leur bbox). Le sens de tri dépend
+du côté :
+Pour les quadrants situés à gauche de l’image (Q1 et Q4 côté droit patient), les incisives centrales
+auront un X plus grand (plus à droite) que les molaires distales (plus à gauche). Ainsi, on triera du
+plus grand X au plus petit X pour Q1 et Q4.
+À l’inverse, pour les quadrants à droite de l’image (Q2 et Q3 côté gauche patient), les incisives
+sont à gauche des molaires sur l’image. On triera donc du plus petit X au plus grand X pour Q2 et
+Q3.
+Cette distinction peut être évitée si on définit plutôt une mesure de distance par rapport à la ligne
+médiane : par exemple calculer l’écart de chaque dent au plan médian vertical, et trier de l’écart le plus
+petit (proche du milieu) à l’écart le plus grand (fond de l’arcade). De cette façon, on obtient directement
+l’ordre incisive -> molaire quel que soit le côté. Cette méthode est robuste même si le quadrant est
+inversé, car on ne se base que sur la distance absolue au centre. Le choix de méthode importe peu tant
+qu’on aboutit à un tri correct.
+Après le tri, la première dent de la liste est censée être l’incisive centrale (position 1) du
+quadrant, et la dernière de la liste la dent la plus postérieure (potentiellement position 8 si
+présente). On peut faire une vérification qualitative ici : si le modèle YOLO avait une
+classification approximative, on peut vérifier si la première dent triée avait été classée comme
+une incisive centrale, etc. Si ce n’est pas le cas (exemple extrême : le modèle aurait pris la canine
+pour une incisive et l’aurait détectée plus près du centre), c’est potentiellement un signe que
+l’incisive manquante a faussé le tri naïf. Cependant, dans la plupart des cas, le tri par position X
+fonctionnera, car même si les classes YOLO sont incertaines, la position relative demeure.
+Exemple d’ordre obtenu : Supposons le quadrant 2 (haut gauche patient) a 8 dents détectées.
+Après tri par X croissant (car côté droit de l’image), on aura un ordre du type : bbox1 (incisive
+centrale 21), bbox2 (incisive latérale 22), bbox3 (canine 23), bbox4 (1re prémolaire 24), ..., bbox8
+(3e molaire 28). Si une dent manque, la liste aura un trou que l’on comblera à l’étape suivante.
+Remarque sur l’axe curviligne : Sur un panoramique, les dents postérieures (molaires) sont
+projetées plus latéralement et un peu plus bas que les dents antérieures. Si on utilisait la
+coordonnée Y seule, l’ordre serait faux (les molaires du haut sont plus basses en image que les
+incisives du haut). C’est pourquoi on utilise l’axe X horizontal pour ordonner les dents le long de
+chaque arcade. Cette astuce suppose que l’arcade est à peu près monotone en X, ce qui est vrai
+globalement. Dans de rares cas d’arcade très arquée, on pourrait raffiner en triant par l’angle
+polaire par rapport au centre de l’arcade, mais cela nécessiterait de connaître le centre de
+courbure de la mâchoire. Par simplicité, le tri par X suffit largement et est utilisé dans la plupart
+des travaux (le module de Tuzoff utilisait implicitement l’ordre spatial des dents avec
+heuristique pour améliorer les résultats ).
+•
+•
+•
+•
+•
+•
+12
+13
+7
+Gestion des cas aberrants : Si le tri par X donne un ordre qui contredit fortement le type
+dentaire prédit (ex : une dent classée en première position mais identifiée par le modèle comme
+une prémolaire), cela peut indiquer qu’une incisive n’a pas été détectée et que la prémolaire est
+effectivement plus proche du milieu faute de dents antérieures. Ce n’est pas vraiment une erreur
+de tri, c’est le signe d’une dent manquante en tête de liste. L’étape suivante traitera ce genre de
+situation.
+À ce stade, nous avons pour chaque quadrant une liste ordonnée de dents détectées dans l’ordre où
+elles doivent être numérotées (sous réserve de dents manquantes à combler).
+4. Attribution des numéros FDI et détection des dents manquantes
+C’est le cœur de l’algorithme : assigner le bon numéro à chaque dent ordonnée, en insérant des
+numéros « sautés » pour les dents non détectées.
+La logique est la suivante : chaque quadrant devrait idéalement avoir la séquence complète de 8
+positions (1 à 8). Si notre liste de dents détectées compte exactement 8 éléments, on peut les
+numéroter directement 1 à 8 (en préfixant du numéro de quadrant) – mais il faudra tout de même
+vérifier la cohérence anatomique (rarement, le détecteur pourrait avoir mis une dent du quadrant
+opposé par erreur, mais on aura normalement filtré cela). Si le nombre de dents détectées n’est pas 8,
+on doit identifier quelles positions sont absentes. Voici comment procéder :
+a. Cas quadrant complet (8 dents détectées) :
+Attribuer simplement les numéros FDI en suivant l’ordre. Par exemple, pour le quadrant 1 (Q1) avec 8
+dents triées, on assigne successivement 11, 12, ..., 18 aux dents 1ère, 2ème, ..., 8ème de la liste. On
+vérifie rapidement que la dernière dent est bien positionnée tout au fond de l’arcade (sinon, cela
+pourrait signifier qu’une dent en plus a été détectée, voir plus bas).
+b. Cas d’une dent manquante (7 dents détectées) :
+Il faut déterminer quel rang (1 à 8) est absent. Plusieurs approches complémentaires :
+Analyse des écarts en X : On calcule les distances entre centres en X consécutifs dans la liste
+triée. En temps normal, les distances entre dents adjacentes sont relativement homogènes (car
+les dents se touchent presque dans l’arcade). Si une dent manque, un écart sera notablement plus
+grand à l’endroit du manque. Par exemple, si en quadrant 4 on voit un espacement beaucoup
+plus large entre deux dents consécutives de la liste, cela suggère qu’une dent n’a pas été
+détectée entre ces deux-là. On identifie l’endroit où l’écart ΔX est maximal et dépasse un seuil
+(par ex. > 1,5× l’écart moyen des autres paires). La position manquante correspondra alors entre
+ces deux dents. Par exemple, supposons en Q2 la distance entre la 2ème et 3ème dent de la liste
+est très grande par rapport aux autres : cela indique probablement que la dent qui aurait dû être
+en 3ème position manque (souvent la canine 23). On en déduit que les dents présentes de rang
+supérieur devront décaler leur numéro. Concrètement, on peut assigner : première dent de la
+liste = 21 (incisive centrale), deuxième = 22 (incisive latérale), constater que la suivante dans la
+liste n’est pas contiguë (grand écart), en conclure que la dent suivante aurait dû être 23 mais
+n’est pas là. On marque 23 comme manquante, puis on assigne à la dent détectée suivante le
+numéro 24, et on continue la séquence.
+Vérification par type anatomique (si disponible) : Si la classification YOLO (incisive, canine,
+etc.) est peu fiable globalement, elle peut tout de même aider ponctuellement. Par exemple, si la
+première dent détectée du quadrant est marquée par le modèle comme “canine” au lieu
+•
+•
+•
+8
+d’“incisive”, cela renforce l’hypothèse que l’incisive centrale (#1) manque et que la liste
+commence directement à la canine (qui serait alors #3). De même, si la dernière dent détectée
+était classée “deuxième molaire” au lieu de “troisième molaire”, il manque sans doute la 3e
+molaire (#8) derrière. Ainsi, l’algorithme peut utiliser ces indices :
+Si la dent la plus antérieure du quadrant détectée n’est pas une incisive centrale selon le modèle,
+considérer que la position 1 est manquante (ex. absence de 11 ou 21).
+Si la dent la plus postérieure détectée est étiquetée comme une 2e molaire ou prémolaire, envisager
+que la position 8 (voire 7 et 8) est manquante derrière.
+Si deux dents consécutives détectées ont des types non consécutifs (ex. incisive suivie directement
+d’une prémolaire sans canine détectée), cela signale l’absence de la canine intermédiaire.
+Étant donné que la classification initiale est “peu fiable” d’après l’énoncé, ces vérifications doivent être
+utilisées avec prudence. On pourra plutôt s’appuyer sur l’écart en position et ne prendre en compte les
+labels anatomiques que s’ils sont cohérents et de haute confiance.
+Comparaison à la symétrie controlatérale : On peut regarder le quadrant opposé de la même
+mâchoire (ex. Q1 vs Q2, ou Q3 vs Q4) pour aider. Supposons en Q1 (haut droit) on détecte 7 dents
+et en Q2 (haut gauche) 8 dents. Si on sait que Q2 a toutes ses dents (1 à 8) détectées, on peut
+comparer leur disposition : par exemple, si en Q1 il manque la deuxième dent de la liste, on peut
+regarder quelle est la deuxième dent de Q2 – ce devrait être la 22, incisive latérale gauche. Il est
+plausible que la dent manquante en Q1 soit la 12 (incisive latérale droite) dans ce cas. Souvent,
+les absences congénitales ou extractions se font symétriquement (mais pas toujours). Symétrie
+forte : si Q2 et Q1 ont tous les deux 7 dents détectées, il se peut qu’ils aient perdu la même dent
+de chaque côté (cas fréquent : absence bilatérale des dents de sagesse 18 et 28, par exemple). Le
+fait de voir un schéma similaire de distances dans les deux quadrants conforte l’identification du
+rang manquant. Par exemple, un grand écart après la deuxième dent sur les deux côtés suggère
+que les deux canines (13 et 23) sont manquantes – cas peu courant, mais le principe vaut pour
+les dents de sagesse, etc. Symétrie faible : si l’autre côté a toutes ses dents, on peut s’en servir
+comme « modèle complet » pour l’arcade. Si l’autre côté a aussi une dent manquante mais pas
+au même endroit, la symétrie ne nous aide pas directement, sauf à pointer que différents rangs
+sont manquants de chaque côté. Dans tous les cas, l’algorithme peut tenter d’expliquer le
+nombre de dents manquantes de manière cohérente entre les deux côtés : s’il manque une dent
+en Q1 et aucune en Q2, on est à peu près sûr que Q1 a une absence unique (et on aura identifié
+laquelle via l’écart). S’il manque une dent de chaque côté, parfois on confirmera que ce sont les
+deux #8, etc. L’utilisation de la symétrie est donc plus de l’ordre de la validation que de la
+détection, mais peut affiner les choix quand il y a ambiguïté entre deux positions possibles.
+Cas particulier : dent manquante en extrémité de liste : Si la première dent détectée est en
+fait la deuxième dent du quadrant (ex : on a manqué l’incisive centrale), il n’y aura pas de “grand
+écart” en tête de liste, car on n’a pas de dent avant pour mesurer. On le détectera soit par la
+classification (pas d’incisive détectée), soit par symétrie (l’autre côté a une incisive centrale
+détectée), soit plus simplement en constatant que le nombre total de dents est 7 et qu’aucun
+écart interne n’est très grand. Dans ce dernier cas (7 dents, écarts homogènes, donc
+probablement la dent manquante est à l’avant ou à l’arrière), on peut supposer que la dent
+manquante est soit #1 soit #8. Pour les distinguer :
+Si la dernière dent détectée est très reculée (touchant le bord de la mâchoire sur l’image) et
+probablement une 3e molaire, alors il est plus plausible que c’est la première dent (#1) qui
+manque.
+•
+•
+•
+•
+•
+•
+9
+À l’inverse, si la première dent détectée semble bien être une incisive centrale, mais la dernière
+dent détectée n’est pas très reculée (par exemple la boîte n’atteint pas le bout de la mandibule
+visible), il se peut que ce soit la 8 qui manque.
+On peut aussi regarder l’espace libre après la dernière dent détectée jusqu’au bord de l’os
+mandibulaire ou maxillaire visible : s’il y a un grand espace sans dent là où on attendrait la dent
+de sagesse, cela suggère son absence.
+En combinant ces indices, on détermine quelle(s) position(s) sont absentes dans le quadrant. Si une
+seule dent manque, on saura à quel rang insérer un « trou ». On attribuera alors les numéros FDI comme
+suit : on incrémente normalement les numéros en partant de 1, et dès qu’on atteint la position
+manquante, on saute ce numéro (sans l’assigner à une dent détectée) puis on continue avec la dent
+suivante. Par exemple, quadrant 3 avec 7 dents détectées, si on conclut que la dent manquante est la
+#38 (3e molaire inférieure gauche), on numérotera les 7 dents présentes en 31, 32, 33, 34, 35, 36, 37 et
+on ne donnera rien pour 38 (on peut garder en mémoire que 38 est absente). Si la dent manquante est
+la #34 (prémolaire inférieure gauche) et que 35–38 sont présentes, on numérotera : 31, 32, 33 aux trois
+premières dents, puis on constate l’absence de 34 – on l’insère comme manquante – puis on assigne 35,
+36, 37, 38 aux dents suivantes (qui étaient initialement 4ème à 7ème dans la liste triée). On obtient ainsi
+une correspondance cohérente.
+c. Cas de plusieurs dents manquantes (>1) :
+Si le quadrant a 6 dents détectées ou moins, il manque au moins 2 dents. On applique des principes
+similaires de détection d’écarts, mais il faut être prudent car plusieurs lacunes peuvent fausser la
+distribution des distances. Les scénarios typiques de deux dents manquantes sont : - Deux dents
+contiguës manquantes : souvent les deux dents de sagesse et la 2e molaire absentes ensemble
+(positions 7 et 8 manquantes, fréquent chez certains patients âgés ou édentés postérieurs), ou deux
+prémolaires manquantes (extractions orthodontiques de 4 et 5). Dans ce cas, un unique écart très grand
+apparaîtra englobant l’emplacement des deux dents manquantes. Par exemple, si 6 dents détectées et
+un énorme écart entre ce qui serait par exemple 3ème et 4ème dent de la liste, il se peut que 2
+positions consécutives soient vides là. Comment les repérer ? Si l’écart est vraiment extrême, on peut
+supposer qu’il s’agit de deux dents manquantes d’affilée. On peut confirmer en comparant la longueur
+de l’arcade occupée : par exemple si seulement 6 dents sont présentes et elles occupent une distance
+beaucoup plus courte que l’arcade opposée qui en a 8, il est possible que deux dents consécutives
+manquent vers l’arrière. L’algorithme peut alors décider que deux numéros seront sautés à cet endroit. -
+Dents manquantes non contiguës : par exemple absence de l’incisive latérale (#2) et de la dent de
+sagesse (#8) dans le même quadrant, ce qui est concevable. On verrait alors un écart anormal entre
+dent 1 et 3, et aussi la dernière dent détectée serait la #7 avec un espace vide derrière elle. Il faudrait
+alors insérer un saut en position 2 et un autre en position 8. Pour détecter cela : on trouvera deux
+écarts modérément grands au lieu d’un seul très grand (ou un écart à l’extrémité plus un écart
+interne). On peut, par stratégie, traiter d’abord l’extrémité : vérifier si le nombre total de dents + plus
+grands écarts suggèrent un manque en fin de liste. Ensuite traiter l’écart interne le plus grand pour
+l’autre dent manquante. - Trois dents ou plus manquantes : cas de quadrant très édenté (ex : ne
+restent que 4 dents sur 8). Il faut alors insérer plusieurs numéros manquants. On peut itérer le
+procédé : détecter le plus grand écart, le combler par une dent manquante, puis réévaluer les écarts
+restant entre les groupes de dents présents. Une approche robuste est de comparer le nombre de
+dents détectées n au nombre théorique 8 : il manque m = 8-n dents. On devra donc insérer exactement
+m numéros manquants dans la séquence. L’enjeu est de déterminer à quels rangs. Une solution
+consiste à modéliser l’arcade complète avec 8 positions idéales et à associer les dents détectées à ces
+positions de façon optimale (problème de correspondance). Par exemple, on peut prendre les abscisses
+X des dents détectées et les comparer aux abscisses “types” d’une arcade complète. Bien qu’on n’ait pas
+les abscisses vraies des dents manquantes, on pourrait estimer leur emplacement par interpolation
+régulière. Alternativement, on peut utiliser un algorithme glouton : toujours combler le plus grand trou
+•
+•
+10
+jusqu’à ce que le compte de dents manquantes insérées atteigne m. Chen et al. ont suivi une approche
+par étapes similaires : après suppression des chevauchements, ils détectent les manques en repérant
+les grands vides, insèrent des dents manquantes (fictives) pour combler ces vides, puis appliquent le
+gabarit complet .
+En pratique, voici une stratégie algorithmique pour plusieurs manquantes :
+Calculer m = 8 - (nombre de dents détectées) dans le quadrant.
+Initialiser un tableau des positions 1…8.
+Placer chaque dent détectée à la position susceptible de minimiser le décalage : par exemple, on
+peut d’abord supposer aucune manquante et les assigner par rang ordinal, puis calculer les
+écarts comme mentionné. Ou plus simplement, procéder itérativement :
+Tant qu’il reste des dents non assignées : prendre la première dent détectée de la liste triée et
+l’assigner à la première position disponible dans le tableau des 8 (ici, position 1). Puis prendre la
+dent suivante détectée : si son abscisse X est trop éloignée de la précédente par rapport à un
+seuil, on considère qu’il y a eu une position vide entre les deux -> on laisse la position suivante
+libre et on assigne cette dent à la suivante encore. Concrètement, on incrémente un index de
+position en tenant compte de l’espace.
+Une autre méthode : si on sait qu’il manque m dents, on pourrait distribute m gaps in the 8
+positions. Par exemple, si 2 dents manquent, on pourrait essayer toutes les combinaisons de 2
+positions sur 8 comme étant manquantes et vérifier laquelle correspond le mieux aux écarts
+observés. Mais cela peut être surdimensionné (C(8,m) possibilités, gérable car 8 est petit – pour
+m=3, c’est 56 possibilités au max, donc faisable). On peut scorer chaque hypothèse en
+comparant les positions prévues des dents présentes aux X réels. Cependant, cela peut être
+overkill pour un implémentation Python standard, sauf si l’on souhaite la fiabilité maximale.
+Pour garder l’algorithme compréhensible, on peut donc faire plus simplement : détecter
+successivement les plus grands écarts jusqu’à insérer le nombre requis de dents manquantes.
+Après chaque insertion, on recalcule éventuellement la position des écarts restants. Cette procédure
+heuristique fonctionnera dans la majorité des cas cliniques (où les dents manquantes sont souvent
+groupées ou évidentes).
+d. Attribution des numéros :
+Une fois les positions manquantes identifiées, on finalise l’étiquetage : on assigne à chaque dent
+détectée le numéro FDI = (numéro du quadrant) × 10 + (position index). Par exemple, si une dent est
+assignée comme troisième dent du quadrant 4, son numéro sera 43. On aura pris soin de sauter les
+indices pour les dents manquantes. On peut aussi, en interne, conserver la liste des numéros
+manquants pour éventuellement les signaler ou vérifier symétriquement.
+Exemples concrets :
+- Quadrant 1 avec absence de la 3e molaire (18) : Disons YOLO a détecté 7 dents. Après tri, on voit que la
+dernière dent détectée est très en avant par rapport au bord de la mâchoire. On en déduit que 18
+manque. On assigne les 7 dents présentes à 11–17. Ainsi, aucune dent n’a le numéro 18 (qu’on pourra
+lister comme manquante).
+- Quadrant 2 avec absence de l’incisive latérale (22) : YOLO détecte 7 dents. Après tri, on note un grand gap
+entre la première dent (21) et la deuxième détectée (qui est en fait la canine 23). On insère 22
+manquante entre ces deux. On numérote donc la première dent 21, puis (22 manquante), puis la dent
+suivante reçoit 23, puis 24, ... jusqu’à la dernière détectée qui sera 28.
+- Quadrant 3 avec deux absences (par ex. 31 et 38 manquantes) : Imaginons qu’en bas gauche, le patient
+n’a plus l’incisive centrale ni la dent de sagesse. YOLO pourrait détecter seulement 6 dents : 32,33,...,37.
+Le tri donnera ces 6 dents. L’algorithme remarquera qu’au début de liste, la première dent détectée est
+5
+•
+•
+•
+•
+•
+11
+en fait une incisive latérale (32) – soit via la classification, soit en comparant avec quadrant opposé, soit
+juste en constatant qu’il y a 6 dents et pas d’écart géant sauf en fin. Il va donc insérer la position 31
+manquante au début. Il voit aussi que la dernière dent détectée est probablement une 2e molaire (37)
+et qu’il manque un élément derrière – confirmable par symétrie ou le grand espace après cette molaire
+– il insère donc 38 manquante à la fin. Il assigne ensuite : (31 manquante), 32, 33, 34, 35, 36, 37, (38
+manquante). En sortie, il ne numérotera que les dents détectées (32–37) mais saura que 31 et 38
+n’étaient pas présentes.
+Après cette étape, chaque dent détectée a un numéro FDI unique et cohérent.
+e. Cas d’une dent surnuméraire (plus de 8 détectées) :
+Si jamais un quadrant contient plus de 8 détections distinctes après le filtrage initial (signe possible de
+dent surnuméraire, de double comptage d’une couronne + racine, ou d’erreur), l’algorithme doit éviter
+de produire un numéro erroné (au-delà de 8). On peut traiter ce cas en amont : par exemple, si 9
+détections sont dans le même quadrant, supprimer la détection la moins probable (p. ex. la plus petite
+zone qui pourrait être un fragment ou un artefact). Ceci sort du cas normal mais pour robustesse on
+peut l’implémenter. Alternativement, ne numéroter que les 8 les mieux positionnées et ignorer la 9e. En
+clinique, les dents surnuméraires sont souvent notées séparément (ex : “51” etc. pour des dents hors
+séquence), ce qui dépasse le cadre du FDI standard. Étant donné que le but est d’éviter les erreurs
+grossières, on préférera ne pas assigner de numéro FDI aux extractions/surnuméraires et
+éventuellement émettre un avertissement ou un flag pour vérification humaine.
+5. Vérifications et validations finales
+Une fois tous les numéros attribués aux dents détectées, l’algorithme procède à des contrôles de
+cohérence avant de délivrer le résultat :
+Unicité globale : Vérifier que chaque dent détectée a un numéro distinct et qu’aucun numéro
+FDI valide n’a été attribué deux fois. Normalement, en attribuant par quadrant on évite les
+collisions, mais par précaution on peut rassembler tous les numéros attribués et s’assurer qu’il
+n’y a pas de doublon. Si un doublon était trouvé, ce serait le symptôme d’une erreur logique (par
+exemple une dent d’un quadrant classée par erreur dans un autre quadrant) – cas très
+improbable si les étapes précédentes sont bien suivies.
+Complétude quadrant : Pour chaque quadrant, vérifier que la suite des numéros attribués (et
+non attribués) forme bien une séquence continue de 1 à 8 sans anomalies. Cela signifie :
+Le plus petit numéro attribué dans le quadrant doit être (Quadrant×10 + 1) s’il y a au moins une
+dent, sauf si c’est précisément la #1 qui manque (auquel cas la première dent aura le numéro
+quadrant×10 + 2 et on aura marqué #1 comme absente).
+Le plus grand numéro attribué ne doit pas être inférieur à quadrant×10 + 8 si au moins une dent
+postérieure existe, sauf si #8 manque (auquel cas la dernière attribuée pourrait être 7).
+On s’assure qu’il n’y a pas de “trou” non expliqué : s’il manque un numéro au milieu, il doit être
+consigné comme dent manquante. Par exemple, on ne doit pas voir une séquence 41, 42, 43,
+45... sans que 44 ait été identifié manquant. Notre algorithme a normalement inséré ces
+manquantes en interne, donc cette situation ne devrait pas se présenter.
+Inversement, aucun numéro hors norme ne doit apparaître : p. ex. si on voyait un 49 ou un 40
+c’est invalide. De même un 11 dans un quadrant 2 serait absurde (mais notre mapping de
+quadrant empêche cela en principe).
+•
+•
+•
+•
+•
+•
+12
+Correspondance latérale : Bien que ce ne soit pas toujours fait, on peut effectuer un dernier
+contrôle de symétrie : comparer le nombre de dents numérotées de chaque côté. Par exemple, si
+on obtient quadrant 1 avec 7 dents (18 manquante) et quadrant 2 avec 8 dents, c’est plausible;
+quadrant 3 avec 5 dents et quadrant 4 avec 5 dents, plausible aussi (édentations bilatérales);
+mais si on avait quadrant 1 avec 8 dents et quadrant 2 avec 8 dents, et quadrant 3 avec 3 dents
+et quadrant 4 avec 8 dents, cela indiquerait possiblement un problème (peu probable d’avoir 5
+dents manquantes d’un seul côté inférieur sans prothèse complète). C’est plus une vérification
+de cohérence clinique : de grosses asymétries pourraient alerter qu’une détection est manquée
+ou qu’une dent du côté vide est en fait présente mais non détectée (dépend si on veut signaler
+des possibles faux négatifs du détecteur). Éventuellement, le module pourrait marquer qu’il
+suspecte des dents non détectées si une asymétrie extrême est détectée (ex : 8 vs 3 dents sur
+deux quadrants opposés sans raison apparente).
+Format de sortie : Enfin, l’algorithme formatte le résultat. Typiquement, pour chaque dent
+détectée (chaque bbox), on associe le numéro FDI calculé. On peut retourner une liste d’objets
+{bbox: ..., FDI: XX} . Si souhaité, on peut également retourner la liste des dents
+manquantes par quadrant (ex : quadrant 1 manquante [18], quadrant 2 manquante [], quadrant
+3 manquantes [31, 32, 38], etc.), afin de garder une trace. L’important est que chaque dent
+détectée reçoive un numéro valide et unique.
+Protection contre les erreurs interdites : Juste avant de finaliser, on s’assure une dernière fois
+qu’aucun numéro invalide (10, 20, 39, etc.) n’existe dans la liste . Si c’est le cas (ce qui ne
+devrait pas arriver si la logique est correcte), il faudrait corriger le mapping de quadrant ou
+l’assignation. Ce check final garantit l’exigence « pas de 10, 39 etc. » mentionnée dans l’énoncé.
+Après ces vérifications, on peut considérer que l’ensemble de données est cohérent avec l’anatomie.
+L’algorithme délivre alors les numéros FDI attribués.
+Suggestions pour une implémentation en Python
+L’algorithme décrit peut être codé en Python de manière structurée et maintenable. Voici quelques
+conseils pratiques pour la mise en œuvre :
+Représentation des données : On peut représenter chaque détection de dent comme une
+structure contenant au minimum les coordonnées de la bbox (ou son centre) et un identifiant.
+Par exemple, une classe ToothDetection avec attributs x_center, y_center, bbox,
+confidence, predicted_class etc. Si l’on utilise directement les sorties d’un modèle YOLO,
+on aura sans doute une liste de tuples ou dictionnaires. L’important est de pouvoir accéder aux
+coordonnées x et y facilement pour chaque dent.
+Filtrage des chevauchements (doublons) : On peut écrire une fonction utilitaire
+filter_overlapping(detections, iou_threshold=0.5) qui calcule la zone
+d’intersection sur union de chaque paire de bbox et élimine les doublons. On peut utiliser la
+méthode gloutonne mentionnée (trier par score puis éliminer les suivantes chevauchantes). Des
+bibliothèques comme OpenCV ( cv2.dnn.NMSBoxes ) ou PyTorch ( torchvision.ops.nms )
+peuvent réaliser cela très efficacement si besoin. Dans un contexte de 32 dents max, la méthode
+brute-force O(n^2) est tout à fait acceptable aussi.
+Séparation par quadrants : Après filtrage, on peut séparer haut/bas par une simple condition
+sur y_center . Par exemple :
+•
+•
+•
+11
+•
+•
+•
+13
+detections_upper = [d for d in detections if d.y_center < mid_y]
+detections_lower = [d for d in detections if d.y_center >= mid_y]
+où mid_y peut être la moyenne des y_center ou une constante pré-calibrée (éventuellement
+moitié de la hauteur de l’image). Pour gauche/droite, de même en utilisant x_center par
+rapport à mid_x (moitié de la largeur). Si l’on veut être plus précis, on peut utiliser k-means :
+scikit-learn propose KMeans(n_clusters=2) qu’on peut appliquer sur les coordonnées [[x] ou
+[y]] pour faire le clustering en 1D. Cependant, cela peut être overkill ici. Une astuce sans
+clustering formel : trier les dents par X puis couper la liste en deux groupes égaux – mais mieux
+vaut utiliser la discontinuité naturelle : on peut trouver le vide central en triant tous les x de la
+mâchoire supérieure par ex, et cherchant le plus grand écart entre deux x consécutifs. Cet écart
+devrait se situer vers la ligne médiane (entre les incisives centrales opposées). On peut couper à
+cet endroit. C’est une méthode alternative pour définir midline automatiquement. En Python,
+après tri par X, on peut faire :
+xs = sorted([d.x_center for d in detections_upper])
+gaps = [xs[i+1] - xs[i] for i in range(len(xs)-1)]
+max_gap_index = np.argmax(gaps)
+mid_x = (xs[max_gap_index] + xs[max_gap_index+1]) / 2
+puis séparer selon ce mid_x. Ceci marcherait même si le patient n’était pas parfaitement centré,
+car on détecte le plus grand trou (qui devrait être entre les deux centrales si les deux sont
+présentes, ou entre la canine droite et la canine gauche si les incisives manquent des deux côtés
+– un cas extrême peu probable).
+Tri des dents par quadrant : C’est straightforward en Python avec sorted() et une lambda.
+Par exemple, pour Q1 (haut-gauche image) :
+quadrant1 = sorted(quadrant1, key=lambda d: d.x_center, reverse=True)
+tandis que pour Q2 (haut-droite image) :
+quadrant2 = sorted(quadrant2, key=lambda d: d.x_center, reverse=False)
+Toutefois, comme suggéré, on peut simplement trier par la distance à mid_x pour éviter de
+traiter différemment :
+for quadrant_group in [quadrant1, quadrant2, quadrant3, quadrant4]:
+quadrant_group.sort(key=lambda d: abs(d.x_center - mid_x),
+reverse=False)
+en s’assurant que mid_x est bien la ligne médiane de l’image. Cette façon aligne du milieu vers
+l’extérieur pour les deux côtés. Il faut juste faire attention que cela mélange pas les quadrants
+opposés (d’où l’importance d’avoir séparé en deux groupes distincts par côté avant, sinon un tri
+global par |x - mid| mélangerait Q1 et Q2 ensemble).
+•
+14
+Détection des dents manquantes : On peut implémenter cette logique de manière modulaire.
+Par exemple, écrire une fonction assign_numbers_to_quadrant(detections_list,
+quadrant_id) qui prend la liste triée d’un quadrant et renvoie soit une liste de numéros FDI
+correspondant ou bien une structure plus riche (p. ex. une liste de tuples (dent, FDI_number) et
+éventuellement les manquantes). À l’intérieur, on sait combien de dents sont présentes n =
+len(detections_list) . Si n == 0 , on peut directement retourner une liste vide et
+éventuellement signaler toutes les 8 positions comme manquantes. Si 1 <= n < 8 , on
+applique les étapes :
+Calculer les écarts consécutifs :
+x_positions = [d.x_center for d in detections_list]
+gaps = [x_positions[i+1] - x_positions[i] for i in
+range(len(x_positions)-1)]
+(tenir compte du signe : si trié du milieu vers l’arrière, les gaps seront positifs en valeur absolue
+croissante normalement, mais dans le code on aura potentiellement des valeurs négatives si
+reverse diffère – donc on utilise la valeur absolue ou on fait attention au tri ascendant ou
+descendant). Mieux : prendre la valeur absolue des distances entre dents consécutives sur
+l’arcade. Comme on a trié dans l’ordre de la médiane vers l’arrière, tous les gaps devraient être
+positifs (car x décroît sur un côté ou croît de l’autre, mais l’ordre interne est consis). On peut
+normaliser ça en triant de la centrale vers molaire comme on a fait.
+Trouver le plus grand écart. Si m = 8 - n est le nombre de manquantes attendu, on va
+potentiellement trouver jusqu’à m grands écarts (ou positions extrêmes). On peut, par simplicité,
+détecter un écart > seuil (par ex. > 1,5 * moyenne) comme signifiant une dent manquante entre
+ces deux dents. On insère alors un numéro manquant à cet index. Ensuite, si m > 1, on supprime
+ce gap et recalcule ou on cherche le prochain plus grand.
+Gérer début/fin : pour savoir si la première ou dernière position est manquante, on peut fixer un
+seuil absolu. Par exemple, on sait la largeur moyenne d’une dent sur l’image (en pixels) – on
+pourrait dire que si la toute première dent détectée est à une distance de plus de (largeur
+moyenne * 1.5) du milieu, alors l’incisive centrale manque. De même, si la dernière dent détectée
+est à une distance du bord de l’arcade (bord de l’image ou fin de la distribution des dents) plus
+grande qu’un certain seuil, alors la dent distale manque. Ce bord de l’arcade peut être approximé
+par l’extrémité de la mâchoire visible sur l’image, mais plus simplement on peut considérer que
+si m dents manquent et qu’aucun grand écart interne n’a suffi à en repérer m, alors l’excédent
+concerne probablement les extrémités. Par exemple, 2 dents manquantes et un seul gros écart
+interne identifié => l’autre dent manquante est sans doute tout à la fin (sinon il y aurait deux
+gros écarts). Idem pour le début.
+Après identification, on crée une liste des positions 1..8, on marque lesquelles sont manquantes,
+puis on assigne aux dents détectées les numéros correspondants aux positions libres.
+Ce processus demande à bien tester sur des cas types. On peut préparer des tests unitaires avec des
+configurations connues : quadrant complet, quadrant sans #8, sans #1, sans #4, sans #7 et #8, etc.,
+pour valider que la logique attribue correctement. Dans une optique de production clinique, des tests
+sur de vraies données annotées seront indispensables pour s’assurer qu’aucune situation ne
+provoque d’erreur de numérotation.
+Utilisation des données de classification YOLO : Si le modèle YOLO fournit malgré tout une
+classe anatomique par dent (incisive_centrale, canine, etc.), on peut s’en servir de manière
+pondérée. Par exemple, s’il prédit une canine là où on s’attendrait à une incisive centrale (#1), on
+•
+•
+•
+•
+•
+•
+15
+peut ajouter un check : « la première dent de la liste est prédite comme canine, or normalement
+position 1 = incisive, donc suspecter absence de l’incisive ». Ce n’est pas indispensable si l’algorithme
+par écart fait son travail, mais cela peut ajouter de la robustesse dans des cas limites (incisive
+petite ou manquante). On peut imaginer un petit dictionnaire reliant le label anatomique aux
+positions probables : {incisive_centrale: [1], incisive_laterale: [2], canine: [3], premolaire: [4,5],
+molaire: [6,7,8]} et, après un premier assignement brut, vérifier si chaque dent détectée a un
+numéro cohérent avec son type prédit. Si une discordance flagrante apparaît (ex. modèle dit
+“canine” mais on lui a attribué #2 incisive latérale), et qu’il y a une position manquante possible
+plus tôt, on pourrait réajuster. Toutefois, étant donné la faible fiabilité mentionnée, cette étape
+pourrait autant introduire de l’erreur que résoudre des ambiguïtés. À utiliser prudemment ou à
+désactiver en cas de doute.
+Performance : Ce genre d’algorithme est très léger (quelques boucles sur max 32 éléments), le
+temps de calcul est négligeable par rapport au modèle de détection. On peut donc se permettre
+des approches simples et compréhensibles sans souci d’optimisation prématurée. Même l’essai
+de combinaisons pour positions manquantes est envisageable vu le petit nombre (8). En
+production, l’algorithme pourra être exécuté en quelques millisecondes au plus.
+Lisibilité du code : Il faut s’attacher à écrire de manière claire pour éviter les erreurs de style.
+Par exemple, définir des fonctions bien nommées pour chaque sous-tâche (filtrage,
+quadrant_split, sort_quadrant, assign_numbers, etc.). Cela facilitera la maintenance et les
+évolutions (par exemple, si on veut plus tard gérer aussi la numérotation des dents temporaires
+avec quadrants 5–8, on pourra adapter l’algorithme assez facilement en paramétrant le nombre
+de dents attendu par quadrant en fonction de l’âge du patient).
+Tests et validation : Avant déploiement clinique, tester sur de nombreuses panoramiques
+annotées est primordial. On comparera les numéros attribués automatiquement aux numéros
+attendus (par un expert). Les règles étant déterministes, on devrait obtenir un taux d’exactitude
+très élevé si la détection YOLO est correcte. Les principales erreurs possibles proviendront de
+dents non détectées par YOLO (que l’algorithme peut compenser en marquant manquantes, ce
+qui est bien), ou de fausses détections (que le filtrage initial devrait éliminer). En cas de fausse
+détection isolée (par ex. un bout d’artefact détecté comme dent), l’algorithme pourrait lui
+assigner un numéro, ce qui serait un faux positif. Une solution en production est d’intégrer un
+seuil de confiance minimal pour considérer une détection (ex. n’accepter que les boîtes > 0.5 de
+confiance YOLO). Ainsi, on réduit le risque de numérotation d’objets qui ne sont pas des dents.
+En conclusion, l’algorithme proposé combine les meilleures pratiques issues de la littérature et des
+considérations anatomiques solides. Il segmente l’image en quadrants, ordonne les dents, insère les
+numéros manquants là où des écarts le suggèrent , et attribue à chaque dent un numéro FDI unique
+et valide en évitant les pièges (inversions gauche-droite, doublons, sauts illogiques). Cette approche a
+fait ses preuves dans les études récentes, où l’utilisation d’un gabarit FDI améliore significativement la
+fiabilité de la numérotation automatique . Avec une implémentation Python soignée et bien
+testée, on peut obtenir un module de numérotation dentaire automatique robuste et prêt pour la
+clinique, s’intégrant après le modèle de détection YOLO pour fournir en sortie un odontogramme
+numérique complet du patient.
+Sources : Les principes présentés s’appuient notamment sur les travaux de Chen et al. (2019) ,
+Tuzoff et al. (2019) , et Nosrati et al. (2020) , qui démontrent tous la nécessité de combiner
+vision par ordinateur et règles dentaires pour atteindre une précision quasi-humaine en numérotation
+automatique. Des exemples d’implémentation open-source (p. ex. Detectron2 pour la segmentation par
+quadrant ) confirment la faisabilité technique. L’algorithme décrit intègre ces bonnes pratiques et
+•
+•
+•
+6
+1 8
+3 10
+1 2 8
+7
+16
+répond aux exigences (pas d’erreurs de style ni d’attribution du type “10” ou “39” qui ne sont pas des
+dents valides). En suivant ce plan, on obtient un système automatique de numérotation FDI apte à
+soulager le clinicien du travail fastidieux de l’odontogramme tout en garantissant la qualité et la
+cohérence des identifications.
+Tooth detection and numbering in panoramic radiographs using convolutional neural
+networks - PubMed
+https://pubmed.ncbi.nlm.nih.gov/30835551/
+A deep learning approach to automatic teeth detection and numbering based on
+object detection in dental periapical films - PubMed
+https://pubmed.ncbi.nlm.nih.gov/30846758/
+GitHub - hedzd/Tooth-Numbering: An object detection project using Detectron2
+https://github.com/hedzd/Tooth-Numbering
+Automatic Tooth Detection and Numbering Using a Combination of a CNN and Heuristic Algorithm
+https://www.mdpi.com/2076-3417/10/16/5624
+YOLO-V5 based deep learning approach for tooth detection and segmentation on pediatric
+panoramic radiographs in mixed dentition | BMC Medical Imaging | Full Text
+https://bmcmedimaging.biomedcentral.com/articles/10.1186/s12880-024-01338-w
+A. FDI numbering system. It divides all teeth into four quadrants where... | Download Scientific
+Diagram
+https://www.researchgate.net/figure/A-FDI-numbering-system-It-divides-all-teeth-into-four-quadrants-where-teeth-arelabeled_fig1_342464100
+10 1
+1 2 12 13
+3 4 5 6 10
+7
+8
+9
+11
+17
