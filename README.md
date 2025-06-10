@@ -1,5 +1,20 @@
-création d'un docker dirrectement connecté à runpods serverless.
+# Worker RunPod pour analyse dentaire
 
-Les modèles denst bridge et implant doivent être d'abord utilisés sur l'image qui leur sera données, ensuite un script python (cf "cahier des charges pour script python fdi" ) doit faire l'attribution des fdi et vérifier si un dent n'a pas étée prise pour un implant (vérifier supperposition des détection implant et dent) et ensuite donne rle schéma dentaire.
+Ce projet fournit un worker compatible avec la plateforme RunPod. Il applique les modèles de détection `dents`, `bridges` et `implants` sur l'image reçue, attribue les numéros FDI puis retourne un résumé.
 
-Ensuite chaque dent va être découpé pour passer aux modèle de classifiaction pour avoir ensuite un compte rendu qui ser effectué par un autre script python. Ce compte rendu contient déjà un schéma dentaire, puis le résultat de chacun des modèle si poisitif se référant aux dent en quesiton: ex: f"La dent {fdi_number} présente un traitement endodontique."
+## Utilisation locale
+
+```bash
+pip install -r requirements.txt
+python main.py
+```
+
+`main.py` lance le handler avec une image de test.
+
+## Déploiement RunPod
+
+Le conteneur exécute `handler.py` qui démarre le worker via `runpod.serverless.start`. Après construction vous pouvez pousser l'image sur RunPod :
+
+```bash
+docker build -t dentaire-worker .
+```
