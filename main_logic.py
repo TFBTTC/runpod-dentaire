@@ -1,5 +1,6 @@
 import cv2
 import torch
+import numpy as np
 from statistics import median
 from dataclasses import dataclass
 from typing import List, Dict, Optional
@@ -17,6 +18,11 @@ model_dents = load_model("models/dents_arch.yaml", "models/dents_weights_only.pt
 model_implants = load_model("models/implants_arch.yaml", "models/implants_weights_only.pt")
 model_bridges = load_model("models/bridges_arch.yaml", "models/bridges_weights_only.pt")
 
+# Classification models
+model_classes_dent = load_model("models/classes_dent_arch.yaml", "models/classes_dent_weights_only.pt")
+model_endo = load_model("models/endo_arch.yaml", "models/endo_weights_only.pt")
+model_restauration = load_model("models/restauration_arch.yaml", "models/restauration_weights_only.pt")
+
 
 @dataclass
 class Detection:
@@ -24,6 +30,7 @@ class Detection:
     score: float
     class_name: str
     center: List[float]
+    classifications: Optional[Dict[str, Dict[str, float]]] = None
 
 
 def iou(box_a: List[float], box_b: List[float]) -> float:
@@ -68,6 +75,43 @@ def detect_objects(model: YOLO, image, keep_only: Optional[List[str]] = None) ->
     return detections
 
 
+def crop_and_resize(image, bbox, size: int = 224):
+    x1, y1, x2, y2 = [int(round(v)) for v in bbox]
+    x1, y1 = max(0, x1), max(0, y1)
+    x2, y2 = min(image.shape[1], x2), min(image.shape[0], y2)
+    crop = image[y1:y2, x1:x2]
+    if crop.size == 0:
+        return np.zeros((size, size, 3), dtype=image.dtype)
+    h, w = crop.shape[:2]
+    scale = size / max(h, w)
+    new_w, new_h = int(w * scale), int(h * scale)
+    resized = cv2.resize(crop, (new_w, new_h), interpolation=cv2.INTER_AREA)
+    canvas = np.zeros((size, size, 3), dtype=image.dtype)
+    x_off = (size - new_w) // 2
+    y_off = (size - new_h) // 2
+    canvas[y_off : y_off + new_h, x_off : x_off + new_w] = resized
+    return canvas
+
+
+def classify_detections(image, detections: List[Detection]) -> None:
+    for det in detections:
+        tooth = crop_and_resize(image, det.bbox)
+        results = {}
+        for key, model in [
+            ("type", model_classes_dent),
+            ("endo", model_endo),
+            ("restauration", model_restauration),
+        ]:
+            res = model(tooth, verbose=False)[0]
+            if hasattr(res, "probs") and res.probs is not None:
+                idx = int(res.probs.top1)
+                score = float(res.probs.data[idx])
+                results[key] = {"class_name": model.names[idx], "score": score}
+            else:
+                results[key] = {"class_name": None, "score": None}
+        det.classifications = results
+
+
 CLASSES_DENTS = ["canine", "central incisor", "lateral incisor", "molar", "premolar"]
 
 
@@ -109,7 +153,13 @@ def assign_tooth_numbers(dents: List[Detection], quadrant: int, mid_x: float, wi
         if pos <= 8:
             numbers.append({"FDI": quadrant * 10 + pos, "status": "absente", "center": None})
             pos += 1
-    numbers.append({"FDI": quadrant * 10 + pos, "status": "présente", "class_name": dents_sorted[0].class_name, "center": dents_sorted[0].center})
+    numbers.append({
+        "FDI": quadrant * 10 + pos,
+        "status": "présente",
+        "class_name": dents_sorted[0].class_name,
+        "center": dents_sorted[0].center,
+        "classifications": dents_sorted[0].classifications,
+    })
     pos += 1
     prev_x = xs[0]
     for cur_x, det in zip(xs[1:], dents_sorted[1:]):
@@ -120,7 +170,13 @@ def assign_tooth_numbers(dents: List[Detection], quadrant: int, mid_x: float, wi
                 numbers.append({"FDI": quadrant * 10 + pos, "status": "absente", "center": None})
                 pos += 1
         if pos <= 8:
-            numbers.append({"FDI": quadrant * 10 + pos, "status": "présente", "class_name": det.class_name, "center": det.center})
+            numbers.append({
+                "FDI": quadrant * 10 + pos,
+                "status": "présente",
+                "class_name": det.class_name,
+                "center": det.center,
+                "classifications": det.classifications,
+            })
             pos += 1
         prev_x = cur_x
     while pos <= 8:
@@ -140,6 +196,7 @@ def assign_fdi_numbers(quadrants: Dict[int, List[Detection]], width: int) -> Lis
 def process_cv2_image(img):
     h, w = img.shape[:2]
     det_dents = nms(detect_objects(model_dents, img, CLASSES_DENTS))
+    classify_detections(img, det_dents)
     det_implants = detect_objects(model_implants, img)
     det_bridges = detect_objects(model_bridges, img)
 
