@@ -1,6 +1,0 @@
-{
-  "name": "Runpod Dentaire",
-  "build": {
-    "dockerfile": "Dockerfile"
-  }
-}
